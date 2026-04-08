@@ -49,12 +49,6 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    // ─── CONFIG — điền vào đây trước khi deploy ────────────────────────────────
-    const CONFIG = {
-      username:    '',     // Bitbucket username
-      appPassword: '', // Bitbucket App Password (Repositories: Read)
-    };
-    // ───────────────────────────────────────────────────────────────────────────
 
     const WORKSPACE = 'creative-force-io';
     const REPO = 'cfplatformdocs';
@@ -110,8 +104,9 @@
 
     // ─── Settings Screen ───────────────────────────────────────────────────────
     function Settings({ onSave, error }) {
-      const [u, setU] = useState('');
-      const [p, setP] = useState('');
+      const [u, setU] = useState(() => localStorage.getItem('bb_user') || '');
+      const [p, setP] = useState(() => localStorage.getItem('bb_pass') || '');
+      const submit = () => u && p && onSave(u, p);
       return (
         <div className="flex items-center justify-center h-full bg-gray-50">
           <div className="bg-white rounded-2xl shadow-xl p-8 w-96">
@@ -131,20 +126,21 @@
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Bitbucket Username</label>
                 <input type="text" value={u} onChange={e => setU(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && submit()}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="your.username" autoFocus />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">App Password</label>
                 <input type="password" value={p} onChange={e => setP(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && u && p && onSave(u, p)}
+                  onKeyDown={e => e.key === 'Enter' && submit()}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="xxxx-xxxx-xxxx-xxxx" />
                 <p className="text-xs text-gray-400 mt-1">
                   Bitbucket → Personal Settings → App passwords → cấp quyền <strong>Repositories: Read</strong>
                 </p>
               </div>
-              <button onClick={() => onSave(u, p)} disabled={!u || !p}
+              <button onClick={submit} disabled={!u || !p}
                 className="w-full bg-blue-600 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                 Kết nối
               </button>
@@ -200,9 +196,61 @@
       );
     }
 
+    // ─── TOC Panel ──────────────────────────────────────────────────────────────
+    function TocPanel({ toc, containerRef }) {
+      const [active, setActive] = useState('');
+
+      useEffect(() => {
+        const el = containerRef.current;
+        if (!el || !toc.length) return;
+        const handler = () => {
+          const containerRect = el.getBoundingClientRect();
+          let current = toc[0]?.id || '';
+          el.querySelectorAll('h1[id],h2[id],h3[id],h4[id]').forEach(h => {
+            if (h.getBoundingClientRect().top - containerRect.top <= 120) current = h.id;
+          });
+          setActive(current);
+        };
+        el.addEventListener('scroll', handler, { passive: true });
+        handler();
+        return () => el.removeEventListener('scroll', handler);
+      }, [toc]);
+
+      if (!toc.length) return null;
+
+      return (
+        <aside className="w-56 shrink-0 border-l border-gray-100 overflow-y-auto py-5 hidden lg:block">
+          <div className="px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">On this page</div>
+          <nav className="space-y-0.5">
+            {toc.map(item => (
+              <button
+                key={item.id}
+                onClick={() => {
+                  const el = document.getElementById(item.id);
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }}
+                className={`w-full text-left py-1 text-xs transition-colors truncate block hover:text-blue-600 ${
+                  active === item.id ? 'text-blue-600 font-semibold' : 'text-gray-400'
+                }`}
+                style={{ paddingLeft: `${16 + (item.level - 1) * 12}px` }}
+                title={item.text}
+              >
+                {item.text}
+              </button>
+            ))}
+          </nav>
+        </aside>
+      );
+    }
+
     // ─── Main App ───────────────────────────────────────────────────────────────
     function App() {
-      const [creds] = useState(CONFIG);
+      const [creds, setCreds] = useState(() => {
+        const u = localStorage.getItem('bb_user');
+        const p = localStorage.getItem('bb_pass');
+        return u && p ? { username: u, appPassword: p } : null;
+      });
+      const [loginError, setLoginError] = useState(null);
       const [branches, setBranches] = useState([]);
       const [branch, setBranch] = useState('');
       const [rootItems, setRootItems] = useState(null);
@@ -212,16 +260,24 @@
       const [error, setError] = useState(null);
       const [branchSearch, setBranchSearch] = useState('');
       const [showBranchList, setShowBranchList] = useState(false);
+      const [toc, setToc] = useState([]);
       const contentRef = useRef(null);
       const branchInputRef = useRef(null);
 
-      // Load branches on mount
+      // Auto-load branches when creds restored from localStorage
       useEffect(() => {
-        fetchBranches(creds).then(bs => {
-          setBranches(bs);
-          setBranch(bs.includes('master') ? 'master' : bs[0] || '');
-        }).catch(e => setError('Không load được branches: ' + e.message));
-      }, []);
+        if (!creds || branches.length > 0) return;
+        fetchBranches(creds)
+          .then(bs => {
+            setBranches(bs);
+            setBranch(bs.includes('master') ? 'master' : bs[0] || '');
+          })
+          .catch(() => {
+            localStorage.removeItem('bb_user');
+            localStorage.removeItem('bb_pass');
+            setCreds(null);
+          });
+      }, [creds]);
 
       // Load docs root on branch change
       useEffect(() => {
@@ -244,13 +300,42 @@
           .catch(e => { setError(e.message); setLoadingFile(false); });
       }, [selectedFile, branch]);
 
-      // Highlight code after markdown render
+      // Highlight code + build TOC after markdown render
       useEffect(() => {
         if (!contentRef.current || !content) return;
         contentRef.current.querySelectorAll('pre code:not(.hljs)').forEach(block => {
           hljs.highlightElement(block);
         });
+        const headings = Array.from(contentRef.current.querySelectorAll('h1,h2,h3,h4'));
+        const items = headings.map((h, i) => {
+          const id = 'h-' + i + '-' + h.textContent.toLowerCase().replace(/[^\w]+/g, '-').replace(/^-|-$/g, '');
+          h.id = id;
+          return { id, text: h.textContent, level: parseInt(h.tagName[1]) };
+        });
+        setToc(items);
       }, [content]);
+
+      // Reset TOC when file changes
+      useEffect(() => { setToc([]); }, [selectedFile]);
+
+      const handleLogin = async (username, appPassword) => {
+        const newCreds = { username, appPassword };
+        setLoginError(null);
+        try {
+          const bs = await fetchBranches(newCreds);
+          localStorage.setItem('bb_user', username);
+          localStorage.setItem('bb_pass', appPassword);
+          setCreds(newCreds);
+          setBranches(bs);
+          setBranch(bs.includes('master') ? 'master' : bs[0] || '');
+        } catch (e) {
+          setLoginError(e.message);
+        }
+      };
+
+      if (!creds) {
+        return <Settings onSave={handleLogin} error={loginError} />;
+      }
 
       const filteredBranches = branches.filter(b =>
         b.toLowerCase().includes(branchSearch.toLowerCase())
@@ -346,7 +431,7 @@
               }
             </aside>
 
-            {/* Content area */}
+            {/* Content area + TOC */}
             <main ref={contentRef} className="flex-1 overflow-y-auto">
               {!selectedFile ? (
                 <div className="flex items-center justify-center h-full">
@@ -386,6 +471,7 @@
                 </div>
               )}
             </main>
+            {isMd && <TocPanel toc={toc} containerRef={contentRef} />}
           </div>
         </div>
       );
