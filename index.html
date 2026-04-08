@@ -11,6 +11,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
   <style>
     .md h1 { font-size: 1.875rem; font-weight: 700; margin: 1.5rem 0 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid #e5e7eb; }
     .md h2 { font-size: 1.5rem; font-weight: 700; margin: 1.5rem 0 0.75rem; padding-bottom: 0.3rem; border-bottom: 1px solid #f3f4f6; }
@@ -49,6 +50,48 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
+
+    // ─── Download helpers ────────────────────────────────────────────────────────
+    function triggerDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    async function collectAllFiles(creds, branch, dirPath) {
+      const items = await fetchDir(creds, branch, dirPath);
+      const files = [];
+      for (const item of items) {
+        if (item.type === 'commit_directory') {
+          files.push(...await collectAllFiles(creds, branch, item.path));
+        } else {
+          files.push(item.path);
+        }
+      }
+      return files;
+    }
+
+    async function downloadSingleFile(creds, branch, path) {
+      const text = await fetchFile(creds, branch, path);
+      triggerDownload(new Blob([text], { type: 'text/plain' }), path.split('/').pop());
+    }
+
+    async function downloadFolderAsZip(creds, branch, dirPath, onProgress) {
+      const zip = new JSZip();
+      const files = await collectAllFiles(creds, branch, dirPath);
+      let done = 0;
+      await Promise.all(files.map(async fp => {
+        const text = await fetchFile(creds, branch, fp);
+        zip.file(fp.substring(dirPath.length + 1), text);
+        onProgress(++done, files.length);
+      }));
+      const blob = await zip.generateAsync({ type: 'blob' });
+      triggerDownload(blob, dirPath.split('/').pop() + '.zip');
+    }
+    // ────────────────────────────────────────────────────────────────────────────
 
     const WORKSPACE = 'creative-force-io';
     const REPO = 'cfplatformdocs';
@@ -103,10 +146,10 @@
     }
 
     // ─── Settings Screen ───────────────────────────────────────────────────────
-    function Settings({ onSave, error }) {
+    function Settings({ onSave, error, loading }) {
       const [u, setU] = useState(() => localStorage.getItem('bb_user') || '');
       const [p, setP] = useState(() => localStorage.getItem('bb_pass') || '');
-      const submit = () => u && p && onSave(u, p);
+      const submit = () => u && p && !loading && onSave(u, p);
       return (
         <div className="flex items-center justify-center h-full bg-gray-50">
           <div className="bg-white rounded-2xl shadow-xl p-8 w-96">
@@ -127,22 +170,32 @@
                 <label className="block text-sm font-medium text-gray-700 mb-1">Bitbucket Username</label>
                 <input type="text" value={u} onChange={e => setU(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && submit()}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={loading}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                   placeholder="your.username" autoFocus />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">App Password</label>
                 <input type="password" value={p} onChange={e => setP(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && submit()}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={loading}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                   placeholder="xxxx-xxxx-xxxx-xxxx" />
                 <p className="text-xs text-gray-400 mt-1">
                   Bitbucket → Personal Settings → App passwords → cấp quyền <strong>Repositories: Read</strong>
                 </p>
               </div>
-              <button onClick={submit} disabled={!u || !p}
-                className="w-full bg-blue-600 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-                Kết nối
+              <button onClick={submit} disabled={!u || !p || loading}
+                className="w-full bg-blue-600 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2">
+                {loading ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+                    </svg>
+                    Đang kết nối...
+                  </>
+                ) : 'Kết nối'}
               </button>
             </div>
           </div>
@@ -155,6 +208,7 @@
       const [open, setOpen] = useState(false);
       const [children, setChildren] = useState(null);
       const [loading, setLoading] = useState(false);
+      const [dlProgress, setDlProgress] = useState(null); // null | '...' | '3/10'
       const isDir = item.type === 'commit_directory';
       const name = item.path.split('/').pop();
       const isMd = name.endsWith('.md') || name.endsWith('.mdx');
@@ -169,6 +223,21 @@
           setLoading(false);
         }
         setOpen(!open);
+      };
+
+      const handleDownload = async (e) => {
+        e.stopPropagation();
+        if (dlProgress !== null) return;
+        try {
+          if (isDir) {
+            setDlProgress('...');
+            await downloadFolderAsZip(creds, branch, item.path, (done, total) => setDlProgress(`${done}/${total}`));
+          } else {
+            setDlProgress('...');
+            await downloadSingleFile(creds, branch, item.path);
+          }
+        } catch(e) { console.error(e); }
+        setDlProgress(null);
       };
 
       return (
@@ -186,11 +255,88 @@
               {isDir ? '📁' : isMd ? '📄' : '📃'}
             </span>
             <span className="truncate">{name}</span>
-            {loading && <span className="ml-auto text-gray-300 text-xs animate-pulse">•••</span>}
+            {loading
+              ? <span className="ml-auto w-3 h-3 border-2 border-gray-300 border-t-blue-400 rounded-full animate-spin shrink-0" />
+              : <button
+                  onClick={handleDownload}
+                  title={isDir ? 'Download folder as ZIP' : 'Download file'}
+                  className="ml-auto shrink-0 text-xs px-1 rounded leading-none transition-opacity opacity-20 hover:opacity-100 hover:text-blue-600"
+                >
+                  {dlProgress !== null ? <span className="animate-pulse text-blue-500">{dlProgress}</span> : '⬇'}
+                </button>
+            }
           </div>
+          {open && children === null && loading && (
+            <div className="py-1" style={{ paddingLeft: `${10 + (depth + 1) * 14}px` }}>
+              {[65, 80, 50].map((w, i) => (
+                <div key={i} className="h-5 bg-gray-100 rounded-md animate-pulse mb-1" style={{ width: `${w}%`, animationDelay: `${i * 0.1}s` }} />
+              ))}
+            </div>
+          )}
           {open && children && children.map(c => (
             <TreeNode key={c.path} item={c} creds={creds} branch={branch}
               selectedFile={selectedFile} onSelect={onSelect} depth={depth + 1} />
+          ))}
+        </div>
+      );
+    }
+
+    // ─── Loading Screen ─────────────────────────────────────────────────────────
+    function LoadingScreen({ message }) {
+      return (
+        <div className="flex items-center justify-center h-full bg-gray-50">
+          <div className="flex flex-col items-center gap-6">
+            {/* Logo with pulse ring */}
+            <div className="relative">
+              <div className="absolute inset-0 bg-blue-400 rounded-2xl animate-ping opacity-20"></div>
+              <div className="relative w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center text-white font-bold text-xl shadow-lg">
+                CF
+              </div>
+            </div>
+
+            {/* Animated dots */}
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex gap-1.5">
+                {[0, 1, 2].map(i => (
+                  <div
+                    key={i}
+                    className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"
+                    style={{ animationDelay: `${i * 0.15}s`, animationDuration: '0.8s' }}
+                  />
+                ))}
+              </div>
+              <p className="text-sm text-gray-400">{message || 'Đang tải...'}</p>
+            </div>
+
+            {/* Skeleton preview */}
+            <div className="flex gap-3 opacity-30 mt-2">
+              <div className="w-40 space-y-2">
+                {[60, 80, 50, 70, 90, 55].map((w, i) => (
+                  <div key={i} className="h-3 bg-gray-300 rounded animate-pulse" style={{ width: `${w}%`, animationDelay: `${i * 0.1}s` }} />
+                ))}
+              </div>
+              <div className="w-64 space-y-2">
+                {[100, 90, 70, 95, 60, 85, 75].map((w, i) => (
+                  <div key={i} className="h-3 bg-gray-300 rounded animate-pulse" style={{ width: `${w}%`, animationDelay: `${i * 0.08}s` }} />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Sidebar Skeleton ────────────────────────────────────────────────────────
+    function SidebarSkeleton() {
+      const rows = [70, 55, 85, 60, 75, 50, 90, 65];
+      return (
+        <div className="px-3 py-2 space-y-1">
+          {rows.map((w, i) => (
+            <div
+              key={i}
+              className="h-6 bg-gray-100 rounded-md animate-pulse"
+              style={{ width: `${w}%`, animationDelay: `${i * 0.07}s` }}
+            />
           ))}
         </div>
       );
@@ -251,6 +397,8 @@
         return u && p ? { username: u, appPassword: p } : null;
       });
       const [loginError, setLoginError] = useState(null);
+      const [loginLoading, setLoginLoading] = useState(false);
+      const [restoring, setRestoring] = useState(() => !!(localStorage.getItem('bb_user') && localStorage.getItem('bb_pass')));
       const [branches, setBranches] = useState([]);
       const [branch, setBranch] = useState('');
       const [rootItems, setRootItems] = useState(null);
@@ -271,12 +419,15 @@
           .then(bs => {
             setBranches(bs);
             setBranch(bs.includes('master') ? 'master' : bs[0] || '');
+            const lastFile = localStorage.getItem('bb_last_file');
+            if (lastFile) setSelectedFile(lastFile);
           })
           .catch(() => {
             localStorage.removeItem('bb_user');
             localStorage.removeItem('bb_pass');
             setCreds(null);
-          });
+          })
+          .finally(() => setRestoring(false));
       }, [creds]);
 
       // Load docs root on branch change
@@ -290,9 +441,10 @@
           .catch(e => setError('Không load được docs/: ' + e.message));
       }, [creds, branch]);
 
-      // Load file content
+      // Load file content + remember last viewed
       useEffect(() => {
         if (!selectedFile || !creds) return;
+        localStorage.setItem('bb_last_file', selectedFile);
         setLoadingFile(true);
         setContent('');
         fetchFile(creds, branch, selectedFile)
@@ -321,6 +473,7 @@
       const handleLogin = async (username, appPassword) => {
         const newCreds = { username, appPassword };
         setLoginError(null);
+        setLoginLoading(true);
         try {
           const bs = await fetchBranches(newCreds);
           localStorage.setItem('bb_user', username);
@@ -330,11 +483,17 @@
           setBranch(bs.includes('master') ? 'master' : bs[0] || '');
         } catch (e) {
           setLoginError(e.message);
+        } finally {
+          setLoginLoading(false);
         }
       };
 
+      if (restoring) {
+        return <LoadingScreen message="Đang khôi phục phiên..." />;
+      }
+
       if (!creds) {
-        return <Settings onSave={handleLogin} error={loginError} />;
+        return <Settings onSave={handleLogin} error={loginError} loading={loginLoading} />;
       }
 
       const filteredBranches = branches.filter(b =>
@@ -421,7 +580,7 @@
                 📁 docs/
               </div>
               {rootItems === null
-                ? <div className="px-4 py-3 text-sm text-gray-300 animate-pulse">Đang tải...</div>
+                ? <SidebarSkeleton />
                 : rootItems.length === 0
                 ? <div className="px-4 py-3 text-sm text-gray-400">Thư mục docs/ trống</div>
                 : rootItems.map(item => (
@@ -449,7 +608,7 @@
                 </div>
               ) : (
                 <div className="max-w-4xl mx-auto px-10 py-8">
-                  {/* Breadcrumb */}
+                  {/* Breadcrumb + download */}
                   <div className="flex items-center gap-1 text-xs text-gray-400 font-mono mb-6 pb-4 border-b border-gray-100">
                     {selectedFile.split('/').map((part, i, arr) => (
                       <span key={i} className="flex items-center gap-1">
@@ -457,6 +616,11 @@
                         <span className={i === arr.length - 1 ? 'text-gray-600' : ''}>{part}</span>
                       </span>
                     ))}
+                    <button
+                      onClick={() => downloadSingleFile(creds, branch, selectedFile)}
+                      title="Download file"
+                      className="ml-auto text-gray-300 hover:text-blue-600 transition-colors px-1"
+                    >⬇</button>
                   </div>
 
                   {isMd ? (
