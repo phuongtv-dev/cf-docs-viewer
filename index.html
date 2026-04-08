@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CF Docs Viewer</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <style>
+    .md h1 { font-size: 1.875rem; font-weight: 700; margin: 1.5rem 0 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid #e5e7eb; }
+    .md h2 { font-size: 1.5rem; font-weight: 700; margin: 1.5rem 0 0.75rem; padding-bottom: 0.3rem; border-bottom: 1px solid #f3f4f6; }
+    .md h3 { font-size: 1.25rem; font-weight: 600; margin: 1.25rem 0 0.5rem; }
+    .md h4 { font-size: 1.1rem; font-weight: 600; margin: 1rem 0 0.5rem; }
+    .md p { margin: 0.75rem 0; line-height: 1.75; color: #374151; }
+    .md ul, .md ol { margin: 0.75rem 0; padding-left: 1.75rem; color: #374151; }
+    .md li { margin: 0.3rem 0; line-height: 1.6; }
+    .md code { background: #f1f5f9; color: #0f172a; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.875em; font-family: 'Consolas', 'Monaco', monospace; }
+    .md pre { background: #f8fafc; border: 1px solid #e2e8f0; padding: 1.25rem; border-radius: 8px; overflow-x: auto; margin: 1rem 0; }
+    .md pre code { background: none; padding: 0; font-size: 0.875rem; }
+    .md blockquote { border-left: 4px solid #3b82f6; background: #eff6ff; margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 0 6px 6px 0; color: #1e40af; }
+    .md table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }
+    .md th { background: #f8fafc; font-weight: 600; border: 1px solid #e2e8f0; padding: 0.6rem 1rem; text-align: left; }
+    .md td { border: 1px solid #e2e8f0; padding: 0.6rem 1rem; }
+    .md tr:nth-child(even) td { background: #fafafa; }
+    .md a { color: #2563eb; text-decoration: underline; }
+    .md a:hover { color: #1d4ed8; }
+    .md hr { border: none; border-top: 1px solid #e5e7eb; margin: 2rem 0; }
+    .md img { max-width: 100%; border-radius: 6px; }
+    .md strong { font-weight: 600; }
+
+    .tree-item:hover { background: #f1f5f9; }
+    .tree-item.selected { background: #eff6ff; color: #2563eb; }
+    .tree-item.selected:hover { background: #dbeafe; }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+  </style>
+</head>
+<body class="bg-gray-50 h-screen flex flex-col overflow-hidden" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div id="root" class="flex flex-col h-full"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ─── CONFIG — điền vào đây trước khi deploy ────────────────────────────────
+    const CONFIG = {
+      username:    'phuong@creativeforce.io',     // Bitbucket username
+      appPassword: 'ATATT3xFfGF0tJqCMhbMI_b49V6q0FWgUScWbqpC5sS2KzbPSMLiCXHyQB3QMYd4o6gQuX_2Z4wT7hqt3YDpS1Pb5-mUshd0JzFnSjr0hC1SSkpOwRq8W4HVSW-yWVMDK5skTfx_Be3UEPBEtfMnAqzAghtYLEhsAc3nZpZpAJVoM4fSy5FVMQs=BF3B506B', // Bitbucket App Password (Repositories: Read)
+    };
+    // ───────────────────────────────────────────────────────────────────────────
+
+    const WORKSPACE = 'creative-force-io';
+    const REPO = 'cfplatformdocs';
+    const DOCS_PATH = 'docs';
+
+    function authHeader(u, p) {
+      return 'Basic ' + btoa(`${u}:${p}`);
+    }
+
+    async function bbFetch(url, creds) {
+      const res = await fetch(url, {
+        headers: { 'Authorization': authHeader(creds.username, creds.appPassword) }
+      });
+      if (res.status === 401) throw new Error('401: Sai username hoặc App Password');
+      if (res.status === 404) throw new Error('404: Không tìm thấy');
+      if (!res.ok) throw new Error(`Lỗi ${res.status}`);
+      return res;
+    }
+
+    async function fetchBranches(creds) {
+      let branches = [], url =
+        `https://api.bitbucket.org/2.0/repositories/${WORKSPACE}/${REPO}/refs/branches?pagelen=100&sort=-target.date`;
+      while (url) {
+        const data = await (await bbFetch(url, creds)).json();
+        branches = branches.concat(data.values.map(b => b.name));
+        url = data.next || null;
+      }
+      return branches;
+    }
+
+    async function fetchDir(creds, branch, path) {
+      let items = [], url =
+        `https://api.bitbucket.org/2.0/repositories/${WORKSPACE}/${REPO}/src/${encodeURIComponent(branch)}/${path}/?pagelen=100`;
+      while (url) {
+        const data = await (await bbFetch(url, creds)).json();
+        items = items.concat(data.values);
+        url = data.next || null;
+      }
+      items.sort((a, b) => {
+        if (a.type === b.type) return a.path.localeCompare(b.path);
+        return a.type === 'commit_directory' ? -1 : 1;
+      });
+      return items;
+    }
+
+    async function fetchFile(creds, branch, path) {
+      const res = await bbFetch(
+        `https://api.bitbucket.org/2.0/repositories/${WORKSPACE}/${REPO}/src/${encodeURIComponent(branch)}/${path}`,
+        creds
+      );
+      return res.text();
+    }
+
+    // ─── Settings Screen ───────────────────────────────────────────────────────
+    function Settings({ onSave, error }) {
+      const [u, setU] = useState('');
+      const [p, setP] = useState('');
+      return (
+        <div className="flex items-center justify-center h-full bg-gray-50">
+          <div className="bg-white rounded-2xl shadow-xl p-8 w-96">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white font-bold text-lg">CF</div>
+              <div>
+                <h1 className="font-bold text-gray-900 text-lg leading-tight">CF Docs Viewer</h1>
+                <p className="text-gray-400 text-xs">{WORKSPACE}/{REPO}</p>
+              </div>
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700 mb-4">{error}</div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Bitbucket Username</label>
+                <input type="text" value={u} onChange={e => setU(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="your.username" autoFocus />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">App Password</label>
+                <input type="password" value={p} onChange={e => setP(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && u && p && onSave(u, p)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="xxxx-xxxx-xxxx-xxxx" />
+                <p className="text-xs text-gray-400 mt-1">
+                  Bitbucket → Personal Settings → App passwords → cấp quyền <strong>Repositories: Read</strong>
+                </p>
+              </div>
+              <button onClick={() => onSave(u, p)} disabled={!u || !p}
+                className="w-full bg-blue-600 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                Kết nối
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Tree Node ──────────────────────────────────────────────────────────────
+    function TreeNode({ item, creds, branch, selectedFile, onSelect, depth }) {
+      const [open, setOpen] = useState(false);
+      const [children, setChildren] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const isDir = item.type === 'commit_directory';
+      const name = item.path.split('/').pop();
+      const isMd = name.endsWith('.md') || name.endsWith('.mdx');
+      const isSelected = selectedFile === item.path;
+
+      const handleClick = async () => {
+        if (!isDir) { onSelect(item.path); return; }
+        if (!open && children === null) {
+          setLoading(true);
+          try { setChildren(await fetchDir(creds, branch, item.path)); }
+          catch (e) { console.error(e); }
+          setLoading(false);
+        }
+        setOpen(!open);
+      };
+
+      return (
+        <div>
+          <div
+            onClick={handleClick}
+            title={name}
+            className={`tree-item flex items-center gap-1.5 px-2 py-1 rounded-md cursor-pointer text-sm select-none ${isSelected ? 'selected font-medium' : 'text-gray-700'}`}
+            style={{ paddingLeft: `${10 + depth * 14}px` }}
+          >
+            <span className="shrink-0 text-xs opacity-70">
+              {isDir ? (open ? '▾' : '▸') : ''}
+            </span>
+            <span className="shrink-0">
+              {isDir ? '📁' : isMd ? '📄' : '📃'}
+            </span>
+            <span className="truncate">{name}</span>
+            {loading && <span className="ml-auto text-gray-300 text-xs animate-pulse">•••</span>}
+          </div>
+          {open && children && children.map(c => (
+            <TreeNode key={c.path} item={c} creds={creds} branch={branch}
+              selectedFile={selectedFile} onSelect={onSelect} depth={depth + 1} />
+          ))}
+        </div>
+      );
+    }
+
+    // ─── Main App ───────────────────────────────────────────────────────────────
+    function App() {
+      const [creds] = useState(CONFIG);
+      const [branches, setBranches] = useState([]);
+      const [branch, setBranch] = useState('');
+      const [rootItems, setRootItems] = useState(null);
+      const [selectedFile, setSelectedFile] = useState(null);
+      const [content, setContent] = useState('');
+      const [loadingFile, setLoadingFile] = useState(false);
+      const [error, setError] = useState(null);
+      const [branchSearch, setBranchSearch] = useState('');
+      const [showBranchList, setShowBranchList] = useState(false);
+      const contentRef = useRef(null);
+      const branchInputRef = useRef(null);
+
+      // Load branches on mount
+      useEffect(() => {
+        fetchBranches(creds).then(bs => {
+          setBranches(bs);
+          setBranch(bs.includes('master') ? 'master' : bs[0] || '');
+        }).catch(e => setError('Không load được branches: ' + e.message));
+      }, []);
+
+      // Load docs root on branch change
+      useEffect(() => {
+        if (!creds || !branch) return;
+        setRootItems(null);
+        setSelectedFile(null);
+        setContent('');
+        fetchDir(creds, branch, DOCS_PATH)
+          .then(setRootItems)
+          .catch(e => setError('Không load được docs/: ' + e.message));
+      }, [creds, branch]);
+
+      // Load file content
+      useEffect(() => {
+        if (!selectedFile || !creds) return;
+        setLoadingFile(true);
+        setContent('');
+        fetchFile(creds, branch, selectedFile)
+          .then(text => { setContent(text); setLoadingFile(false); })
+          .catch(e => { setError(e.message); setLoadingFile(false); });
+      }, [selectedFile, branch]);
+
+      // Highlight code after markdown render
+      useEffect(() => {
+        if (!contentRef.current || !content) return;
+        contentRef.current.querySelectorAll('pre code:not(.hljs)').forEach(block => {
+          hljs.highlightElement(block);
+        });
+      }, [content]);
+
+      const filteredBranches = branches.filter(b =>
+        b.toLowerCase().includes(branchSearch.toLowerCase())
+      );
+
+      const fileName = selectedFile ? selectedFile.split('/').pop() : null;
+      const isMd = fileName && (fileName.endsWith('.md') || fileName.endsWith('.mdx'));
+
+
+      return (
+        <div className="flex flex-col h-full">
+          {/* Header */}
+          <header className="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center gap-3 shrink-0 shadow-sm">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-xs">CF</div>
+              <span className="font-semibold text-gray-800 text-sm">Docs Viewer</span>
+              <span className="text-gray-300 text-xs">|</span>
+              <span className="text-gray-400 text-xs font-mono">{WORKSPACE}/{REPO}</span>
+            </div>
+
+            {/* Branch selector */}
+            <div className="relative ml-auto" ref={branchInputRef}>
+              <button
+                onClick={() => { setShowBranchList(!showBranchList); setBranchSearch(''); }}
+                className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 border border-gray-200 rounded-lg px-3 py-1.5 text-sm transition-colors"
+              >
+                <span className="text-gray-500">⎇</span>
+                <span className="font-mono text-gray-800 max-w-48 truncate">{branch || 'Select branch'}</span>
+                <span className="text-gray-400 text-xs">▾</span>
+              </button>
+
+              {showBranchList && (
+                <div className="absolute right-0 top-full mt-1 w-72 bg-white border border-gray-200 rounded-xl shadow-xl z-50 overflow-hidden">
+                  <div className="p-2 border-b border-gray-100">
+                    <input
+                      type="text"
+                      value={branchSearch}
+                      onChange={e => setBranchSearch(e.target.value)}
+                      placeholder="Tìm branch..."
+                      className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      autoFocus
+                    />
+                  </div>
+                  <div className="max-h-72 overflow-y-auto py-1">
+                    {filteredBranches.length === 0
+                      ? <div className="px-3 py-2 text-sm text-gray-400">Không có kết quả</div>
+                      : filteredBranches.map(b => (
+                        <button key={b} onClick={() => { setBranch(b); setShowBranchList(false); }}
+                          className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 flex items-center gap-2 ${b === branch ? 'text-blue-600 font-medium bg-blue-50' : 'text-gray-700'}`}
+                        >
+                          <span className="text-gray-300 text-xs">⎇</span>
+                          <span className="font-mono truncate">{b}</span>
+                          {b === branch && <span className="ml-auto text-blue-400 text-xs">✓</span>}
+                        </button>
+                      ))
+                    }
+                  </div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-xs text-gray-400">
+                    {filteredBranches.length} / {branches.length} branches
+                  </div>
+                </div>
+              )}
+            </div>
+
+          </header>
+
+          {/* Click outside to close branch dropdown */}
+          {showBranchList && (
+            <div className="fixed inset-0 z-40" onClick={() => setShowBranchList(false)} />
+          )}
+
+          {error && (
+            <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex items-center gap-2">
+              <span>⚠️</span> {error}
+              <button onClick={() => setError(null)} className="ml-auto text-amber-400 hover:text-amber-600">✕</button>
+            </div>
+          )}
+
+          <div className="flex flex-1 overflow-hidden">
+            {/* Sidebar */}
+            <aside className="w-60 bg-white border-r border-gray-200 overflow-y-auto shrink-0 py-2">
+              <div className="px-3 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">
+                📁 docs/
+              </div>
+              {rootItems === null
+                ? <div className="px-4 py-3 text-sm text-gray-300 animate-pulse">Đang tải...</div>
+                : rootItems.length === 0
+                ? <div className="px-4 py-3 text-sm text-gray-400">Thư mục docs/ trống</div>
+                : rootItems.map(item => (
+                  <TreeNode key={item.path} item={item} creds={creds} branch={branch}
+                    selectedFile={selectedFile} onSelect={setSelectedFile} depth={0} />
+                ))
+              }
+            </aside>
+
+            {/* Content area */}
+            <main ref={contentRef} className="flex-1 overflow-y-auto">
+              {!selectedFile ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="text-center text-gray-300">
+                    <div className="text-5xl mb-3">📄</div>
+                    <p className="text-sm">Chọn file từ sidebar để xem</p>
+                  </div>
+                </div>
+              ) : loadingFile ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="text-center text-gray-300">
+                    <div className="text-3xl mb-2 animate-pulse">⏳</div>
+                    <p className="text-sm">Đang tải {fileName}...</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="max-w-4xl mx-auto px-10 py-8">
+                  {/* Breadcrumb */}
+                  <div className="flex items-center gap-1 text-xs text-gray-400 font-mono mb-6 pb-4 border-b border-gray-100">
+                    {selectedFile.split('/').map((part, i, arr) => (
+                      <span key={i} className="flex items-center gap-1">
+                        {i > 0 && <span className="text-gray-200">/</span>}
+                        <span className={i === arr.length - 1 ? 'text-gray-600' : ''}>{part}</span>
+                      </span>
+                    ))}
+                  </div>
+
+                  {isMd ? (
+                    <div className="md" dangerouslySetInnerHTML={{
+                      __html: marked.parse(content, { gfm: true, breaks: false })
+                    }} />
+                  ) : (
+                    <pre className="text-sm bg-gray-50 border border-gray-200 rounded-lg p-5 overflow-x-auto">
+                      <code>{content}</code>
+                    </pre>
+                  )}
+                </div>
+              )}
+            </main>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
