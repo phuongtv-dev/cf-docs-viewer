@@ -276,6 +276,14 @@
     const REPO = 'cfplatformdocs';
     const DOCS_PATH = 'docs';
 
+    // Parse share-link hash once on load
+    const initialHash = (() => {
+      try {
+        const p = new URLSearchParams(location.hash.slice(1));
+        return { branch: p.get('b') || '', file: p.get('f') || '' };
+      } catch { return { branch: '', file: '' }; }
+    })();
+
     function authHeader(u, p) { return 'Basic ' + btoa(`${u}:${p}`); }
 
     async function bbFetch(url, creds) {
@@ -560,6 +568,19 @@
       const name = item.path.split('/').pop();
       const isSelected = selectedFile === item.path;
 
+      // Auto-expand folder when selected file lives inside it
+      useEffect(() => {
+        if (!isDir || !selectedFile || !selectedFile.startsWith(item.path + '/')) return;
+        setOpen(true);
+        if (children === null) {
+          setLoading(true);
+          fetchDir(creds, branch, item.path)
+            .then(c => setChildren(c))
+            .catch(e => console.error(e))
+            .finally(() => setLoading(false));
+        }
+      }, [selectedFile]);
+
       const handleClick = async () => {
         if (!isDir) { onSelect(item.path); return; }
         if (!open && children === null) {
@@ -727,8 +748,14 @@
       const [activeDownload, setActiveDownload] = useState(null);
       const [isDark, setIsDark] = useState(() => localStorage.getItem('cf_theme') === 'dark');
       const [blobUrl, setBlobUrl] = useState(null);
+      const [folderFilter, setFolderFilter] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('bb_folder_filter') || '[]'); } catch { return []; }
+      });
+      const [showFolderFilter, setShowFolderFilter] = useState(false);
       const contentRef = useRef(null);
       const branchRef = useRef(null);
+      const folderFilterRef = useRef(null);
+      const lastFileRef = useRef(initialHash.file || localStorage.getItem('bb_last_file'));
 
       const addToast = (type, msg) => {
         const id = Date.now() + Math.random();
@@ -742,9 +769,9 @@
         fetchBranches(creds)
           .then(bs => {
             setBranches(bs);
-            setBranch(bs.includes('master') ? 'master' : bs[0] || '');
-            const lastFile = localStorage.getItem('bb_last_file');
-            if (lastFile) setSelectedFile(lastFile);
+            const savedBranch = initialHash.branch || localStorage.getItem('bb_last_branch');
+            setBranch(savedBranch && bs.includes(savedBranch) ? savedBranch : (bs.includes('master') ? 'master' : bs[0] || ''));
+            // lastFileRef carries the value; branch-change effect will apply it
           })
           .catch(() => {
             localStorage.removeItem('bb_user');
@@ -761,7 +788,14 @@
         setSelectedFile(null);
         setContent('');
         fetchDir(creds, branch, DOCS_PATH)
-          .then(setRootItems)
+          .then(items => {
+            setRootItems(items);
+            // Restore last-viewed file once after initial load
+            if (lastFileRef.current) {
+              setSelectedFile(lastFileRef.current);
+              lastFileRef.current = null;
+            }
+          })
           .catch(e => {
             if (e.message.includes('404')) setRootItems([]);
             else setError(e.message);
@@ -829,6 +863,30 @@
         localStorage.setItem('cf_theme', isDark ? 'dark' : 'light');
       }, [isDark]);
 
+      // Sync URL hash with current branch + file (share link)
+      useEffect(() => {
+        if (!branch) return;
+        const p = new URLSearchParams();
+        p.set('b', branch);
+        if (selectedFile) p.set('f', selectedFile);
+        history.replaceState(null, '', '#' + p.toString());
+      }, [branch, selectedFile]);
+
+      // Persist folder filter
+      useEffect(() => {
+        localStorage.setItem('bb_folder_filter', JSON.stringify(folderFilter));
+      }, [folderFilter]);
+
+      // Close folder filter on outside click
+      useEffect(() => {
+        if (!showFolderFilter) return;
+        const handler = (e) => {
+          if (folderFilterRef.current && !folderFilterRef.current.contains(e.target)) setShowFolderFilter(false);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+      }, [showFolderFilter]);
+
       // Close branch dropdown on outside click
       useEffect(() => {
         if (!showBranchList) return;
@@ -851,7 +909,8 @@
           localStorage.setItem('bb_pass', appPassword);
           setCreds(newCreds);
           setBranches(bs);
-          setBranch(bs.includes('master') ? 'master' : bs[0] || '');
+          const savedBranch = localStorage.getItem('bb_last_branch');
+          setBranch(savedBranch && bs.includes(savedBranch) ? savedBranch : (bs.includes('master') ? 'master' : bs[0] || ''));
         } catch (e) {
           setLoginError(e.message);
         } finally {
@@ -864,6 +923,13 @@
 
       const filteredBranches = branches.filter(b => b.toLowerCase().includes(branchSearch.toLowerCase()));
       const fileName = selectedFile ? selectedFile.split('/').pop() : null;
+      const displayedItems = !rootItems ? null
+        : folderFilter.length === 0 ? rootItems
+        : rootItems.filter(item => folderFilter.includes(item.path));
+      const topLevelDirs = (rootItems || []).filter(i => i.type === 'commit_directory');
+      const copyShareLink = () => {
+        navigator.clipboard.writeText(location.href).then(() => addToast('success', 'Đã copy link chia sẻ'));
+      };
       const isMd = fileName && /\.mdx?$/.test(fileName);
       const isImage = fileName && /\.(png|jpe?g|gif|svg|webp|bmp|ico)$/i.test(fileName);
       const isDocFile = fileName && /\.docx?$/i.test(fileName);
@@ -882,11 +948,63 @@
               <span style={{fontSize:'0.75rem',color:'var(--text-secondary)',fontFamily:'monospace'}}>{WORKSPACE}/{REPO}</span>
             </div>
 
+            {/* Folder filter */}
+            <div ref={folderFilterRef} style={{position:'relative',marginLeft:'auto'}}>
+              <button
+                onClick={() => setShowFolderFilter(v => !v)}
+                title="Filter folders"
+                style={{background: folderFilter.length > 0 ? 'rgba(47,129,247,0.1)' : 'none',border:'1px solid var(--border)',borderRadius:7,cursor:'pointer',color: folderFilter.length > 0 ? 'var(--accent)' : 'var(--text-secondary)',padding:'0 10px',height:32,display:'flex',alignItems:'center',gap:6,fontSize:'0.8125rem',fontFamily:'Sora,sans-serif',transition:'all 0.15s',flexShrink:0,whiteSpace:'nowrap'}}
+                onMouseEnter={e => { e.currentTarget.style.background='var(--hover-bg)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background=folderFilter.length>0?'rgba(47,129,247,0.1)':'none'; }}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.5A.5.5 0 012 1h12a.5.5 0 01.354.854l-4.5 4.5A.5.5 0 019.5 6.707V13.5a.5.5 0 01-.276.447l-3 1.5A.5.5 0 015.5 15V6.707a.5.5 0 01-.146-.353L1.146 1.854A.5.5 0 011.5 1.5z"/></svg>
+                Folders{folderFilter.length > 0 ? ` (${folderFilter.length})` : ''}
+              </button>
+              {showFolderFilter && (
+                <div style={{position:'absolute',right:0,top:'calc(100% + 6px)',minWidth:220,background:'var(--dropdown-bg)',border:'1px solid var(--border)',borderRadius:10,boxShadow:'0 8px 30px rgba(0,0,0,0.2)',zIndex:9999,overflow:'hidden'}}>
+                  <div style={{padding:'8px 12px',borderBottom:'1px solid var(--border)',fontSize:'0.6875rem',fontWeight:600,color:'var(--text-secondary)',textTransform:'uppercase',letterSpacing:'0.06em',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <span>Hiện/ẩn folders</span>
+                    {folderFilter.length > 0 && (
+                      <button onClick={() => setFolderFilter([])} style={{background:'none',border:'none',cursor:'pointer',fontSize:'0.75rem',color:'var(--accent)',padding:0,fontFamily:'Sora,sans-serif'}}>Hiện tất cả</button>
+                    )}
+                  </div>
+                  {topLevelDirs.length === 0
+                    ? <div style={{padding:'10px 12px',fontSize:'0.8125rem',color:'var(--text-secondary)'}}>Chưa load xong folders</div>
+                    : topLevelDirs.map(dir => {
+                      const name = dir.path.split('/').pop();
+                      const checked = folderFilter.length === 0 || folderFilter.includes(dir.path);
+                      return (
+                        <label key={dir.path} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 12px',cursor:'pointer',fontSize:'0.8125rem',color:'var(--text-primary)',fontFamily:'Sora,sans-serif',transition:'background 0.1s'}}
+                          onMouseEnter={e => e.currentTarget.style.background='var(--hover-bg)'}
+                          onMouseLeave={e => e.currentTarget.style.background='none'}
+                        >
+                          <input type="checkbox" checked={checked} onChange={() => {
+                            setFolderFilter(prev => {
+                              const base = prev.length === 0 ? topLevelDirs.map(d => d.path) : prev;
+                              if (base.includes(dir.path)) {
+                                const next = base.filter(p => p !== dir.path);
+                                return next.length === topLevelDirs.length ? [] : next;
+                              } else {
+                                const next = [...base, dir.path];
+                                return next.length === topLevelDirs.length ? [] : next;
+                              }
+                            });
+                          }} style={{accentColor:'var(--accent)',cursor:'pointer',width:14,height:14}} />
+                          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style={{color:'var(--text-secondary)',flexShrink:0}}><path d="M.54 3.87L.5 3a2 2 0 012-2h3.672a2 2 0 011.414.586l.828.828A2 2 0 009.828 3h3.982a2 2 0 011.992 2.181l-.637 7A2 2 0 0113.174 14H2.826a2 2 0 01-1.991-1.819l-.637-7a1.99 1.99 0 01.342-1.31zM2.19 4a1 1 0 00-.996 1.09l.637 7a1 1 0 00.995.91h10.348a1 1 0 00.995-.91l.637-7A1 1 0 0013.81 4H2.19z"/></svg>
+                          <span style={{fontFamily:'monospace',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+                        </label>
+                      );
+                    })
+                  }
+                </div>
+              )}
+            </div>
+
             {/* Dark mode toggle */}
             <button
               onClick={() => setIsDark(d => !d)}
               title={isDark ? 'Light mode' : 'Dark mode'}
-              style={{marginLeft:'auto',background:'none',border:'1px solid var(--border)',borderRadius:7,cursor:'pointer',color:'var(--text-secondary)',width:32,height:32,display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s',flexShrink:0}}
+              style={{background:'none',border:'1px solid var(--border)',borderRadius:7,cursor:'pointer',color:'var(--text-secondary)',width:32,height:32,display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s',flexShrink:0}}
               onMouseEnter={e => { e.currentTarget.style.background='var(--hover-bg)'; e.currentTarget.style.color='var(--text-primary)'; }}
               onMouseLeave={e => { e.currentTarget.style.background='none'; e.currentTarget.style.color='var(--text-secondary)'; }}
             >
@@ -926,7 +1044,7 @@
                     {filteredBranches.length === 0
                       ? <div style={{padding:'8px 12px',fontSize:'0.8125rem',color:'var(--text-secondary)'}}>No results</div>
                       : filteredBranches.map(b => (
-                        <button key={b} onClick={() => { setBranch(b); setShowBranchList(false); }}
+                        <button key={b} onClick={() => { setBranch(b); localStorage.setItem('bb_last_branch', b); setShowBranchList(false); }}
                           style={{width:'100%',textAlign:'left',padding:'6px 12px',background: b===branch ? 'rgba(47,129,247,0.07)' : 'none',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:8,fontSize:'0.8125rem',color: b===branch ? 'var(--accent)' : 'var(--text-primary)',fontFamily:'Sora,sans-serif',transition:'background 0.1s'}}
                           onMouseEnter={e => { if(b!==branch) e.currentTarget.style.background='var(--hover-bg)'; }}
                           onMouseLeave={e => { if(b!==branch) e.currentTarget.style.background='none'; }}
@@ -965,16 +1083,41 @@
                 Documentation
               </div>
               <div style={{flex:1,overflowY:'auto',padding:'4px 6px 16px'}}>
-                {rootItems === null
+                {displayedItems === null
                   ? <SidebarSkeleton />
-                  : rootItems.length === 0
-                  ? <div style={{padding:'12px 10px',fontSize:'0.8125rem',color:'rgba(139,148,158,0.6)'}}>docs/ folder is empty</div>
-                  : rootItems.map(item => (
+                  : displayedItems.length === 0
+                  ? <div style={{padding:'12px 10px',fontSize:'0.8125rem',color:'rgba(139,148,158,0.6)'}}>{rootItems && rootItems.length > 0 ? 'Tất cả folders đang bị ẩn' : 'docs/ folder is empty'}</div>
+                  : displayedItems.map(item => (
                     <TreeNode key={item.path} item={item} creds={creds} branch={branch}
                       selectedFile={selectedFile} onSelect={setSelectedFile} depth={0}
                       addToast={addToast} onDlChange={setActiveDownload} />
                   ))
                 }
+              </div>
+
+              {/* Logout */}
+              <div style={{padding:'10px 8px',borderTop:'1px solid var(--sidebar-border)',flexShrink:0}}>
+                <button
+                  onClick={() => {
+                    localStorage.removeItem('bb_user');
+                    localStorage.removeItem('bb_pass');
+                    localStorage.removeItem('bb_last_file');
+                    localStorage.removeItem('bb_last_branch');
+                    setCreds(null);
+                    setBranches([]); setBranch(''); setRootItems(null);
+                    setSelectedFile(null); setContent('');
+                    setBlobUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; });
+                  }}
+                  style={{width:'100%',display:'flex',alignItems:'center',gap:8,padding:'7px 10px',background:'none',border:'none',borderRadius:6,cursor:'pointer',color:'var(--sidebar-text)',fontSize:'0.8125rem',fontFamily:'Sora,sans-serif',transition:'all 0.15s',textAlign:'left'}}
+                  onMouseEnter={e => { e.currentTarget.style.background='rgba(239,68,68,0.1)'; e.currentTarget.style.color='#F87171'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background='none'; e.currentTarget.style.color='var(--sidebar-text)'; }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style={{flexShrink:0}}>
+                    <path fillRule="evenodd" d="M10 12.5a.5.5 0 01-.5.5h-8a.5.5 0 01-.5-.5v-9a.5.5 0 01.5-.5h8a.5.5 0 01.5.5v2a.5.5 0 001 0v-2A1.5 1.5 0 009.5 2h-8A1.5 1.5 0 000 3.5v9A1.5 1.5 0 001.5 14h8a1.5 1.5 0 001.5-1.5v-2a.5.5 0 00-1 0v2z"/>
+                    <path fillRule="evenodd" d="M15.854 8.354a.5.5 0 000-.708l-3-3a.5.5 0 10-.708.708L14.293 7.5H5.5a.5.5 0 000 1h8.793l-2.147 2.146a.5.5 0 00.708.708l3-3z"/>
+                  </svg>
+                  Logout
+                </button>
               </div>
             </aside>
 
@@ -1005,10 +1148,17 @@
                         <span style={{color: i===arr.length-1 ? 'var(--text-primary)' : 'var(--text-secondary)'}}>{part}</span>
                       </span>
                     ))}
-                    <button onClick={async () => { try { await downloadSingleFile(creds, branch, selectedFile); addToast('success', `Downloaded ${fileName}`); } catch(e) { addToast('error', 'Download failed'); } }}
-                      style={{marginLeft:'auto',background:'var(--accent)',border:'none',borderRadius:7,cursor:'pointer',color:'#fff',padding:'5px 12px',display:'flex',alignItems:'center',gap:6,fontSize:'0.8125rem',fontWeight:500,fontFamily:'Sora,sans-serif'}}>
-                      <IcoDownload/> Download
-                    </button>
+                    <div style={{marginLeft:'auto',display:'flex',gap:6}}>
+                      <button onClick={copyShareLink} title="Copy share link"
+                        style={{background:'none',border:'1px solid var(--border)',borderRadius:7,cursor:'pointer',color:'var(--text-secondary)',padding:'5px 10px',display:'flex',alignItems:'center',gap:5,fontSize:'0.8125rem',fontFamily:'Sora,sans-serif'}}>
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.715 6.542L3.343 7.914a3 3 0 104.243 4.243l1.828-1.829A3 3 0 008.586 5.5L8 6.086a1.001 1.001 0 00-.154.199 2 2 0 01.861 3.337L6.88 11.45a2 2 0 11-2.83-2.83l.793-.792a4.018 4.018 0 01-.128-1.287z"/><path d="M6.586 4.672A3 3 0 007.414 9.5l.775-.776a2 2 0 01-.896-3.346L9.12 3.55a2 2 0 112.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 10-4.243-4.243L6.586 4.672z"/></svg>
+                        Link
+                      </button>
+                      <button onClick={async () => { try { await downloadSingleFile(creds, branch, selectedFile); addToast('success', `Downloaded ${fileName}`); } catch(e) { addToast('error', 'Download failed'); } }}
+                        style={{background:'var(--accent)',border:'none',borderRadius:7,cursor:'pointer',color:'#fff',padding:'5px 12px',display:'flex',alignItems:'center',gap:6,fontSize:'0.8125rem',fontWeight:500,fontFamily:'Sora,sans-serif'}}>
+                        <IcoDownload/> Download
+                      </button>
+                    </div>
                   </div>
                   {blobUrl ? (
                     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',padding:'2rem',overflow:'auto',background:'var(--page-bg)'}}>
@@ -1030,10 +1180,17 @@
                         <span style={{color: i===arr.length-1 ? 'var(--text-primary)' : 'var(--text-secondary)'}}>{part}</span>
                       </span>
                     ))}
-                    <button onClick={async () => { try { await downloadSingleFile(creds, branch, selectedFile); addToast('success', `Downloaded ${fileName}`); } catch(e) { addToast('error', 'Download failed'); } }}
-                      style={{marginLeft:'auto',background:'var(--accent)',border:'none',borderRadius:7,cursor:'pointer',color:'#fff',padding:'5px 12px',display:'flex',alignItems:'center',gap:6,fontSize:'0.8125rem',fontWeight:500,fontFamily:'Sora,sans-serif'}}>
-                      <IcoDownload/> Download
-                    </button>
+                    <div style={{marginLeft:'auto',display:'flex',gap:6}}>
+                      <button onClick={copyShareLink} title="Copy share link"
+                        style={{background:'none',border:'1px solid var(--border)',borderRadius:7,cursor:'pointer',color:'var(--text-secondary)',padding:'5px 10px',display:'flex',alignItems:'center',gap:5,fontSize:'0.8125rem',fontFamily:'Sora,sans-serif'}}>
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.715 6.542L3.343 7.914a3 3 0 104.243 4.243l1.828-1.829A3 3 0 008.586 5.5L8 6.086a1.001 1.001 0 00-.154.199 2 2 0 01.861 3.337L6.88 11.45a2 2 0 11-2.83-2.83l.793-.792a4.018 4.018 0 01-.128-1.287z"/><path d="M6.586 4.672A3 3 0 007.414 9.5l.775-.776a2 2 0 01-.896-3.346L9.12 3.55a2 2 0 112.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 10-4.243-4.243L6.586 4.672z"/></svg>
+                        Link
+                      </button>
+                      <button onClick={async () => { try { await downloadSingleFile(creds, branch, selectedFile); addToast('success', `Downloaded ${fileName}`); } catch(e) { addToast('error', 'Download failed'); } }}
+                        style={{background:'var(--accent)',border:'none',borderRadius:7,cursor:'pointer',color:'#fff',padding:'5px 12px',display:'flex',alignItems:'center',gap:6,fontSize:'0.8125rem',fontWeight:500,fontFamily:'Sora,sans-serif'}}>
+                        <IcoDownload/> Download
+                      </button>
+                    </div>
                   </div>
                   <iframe srcDoc={content} sandbox="allow-scripts allow-same-origin"
                     style={{flex:1,width:'100%',border:'none',background:'#fff'}} title={fileName} />
@@ -1048,15 +1205,22 @@
                         <span style={{color: i===arr.length-1 ? 'var(--text-primary)' : 'var(--text-secondary)'}}>{part}</span>
                       </span>
                     ))}
-                    <button
-                      onClick={async () => { try { await downloadSingleFile(creds, branch, selectedFile); addToast('success', `Downloaded ${fileName}`); } catch(e) { addToast('error', 'Download failed'); } }}
-                      title="Download file"
-                      style={{marginLeft:'auto',background:'var(--accent)',border:'none',borderRadius:7,cursor:'pointer',color:'#fff',padding:'5px 12px',display:'flex',alignItems:'center',gap:6,fontSize:'0.8125rem',fontWeight:500,transition:'all 0.15s',fontFamily:'Sora,sans-serif',boxShadow:'0 1px 3px rgba(47,129,247,0.3)'}}
-                      onMouseEnter={e => { e.currentTarget.style.background='#1a6fd4'; }}
-                      onMouseLeave={e => { e.currentTarget.style.background='var(--accent)'; }}
-                    >
-                      <IcoDownload/> Download
-                    </button>
+                    <div style={{marginLeft:'auto',display:'flex',gap:6}}>
+                      <button onClick={copyShareLink} title="Copy share link"
+                        style={{background:'none',border:'1px solid var(--border)',borderRadius:7,cursor:'pointer',color:'var(--text-secondary)',padding:'5px 10px',display:'flex',alignItems:'center',gap:5,fontSize:'0.8125rem',fontFamily:'Sora,sans-serif'}}>
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.715 6.542L3.343 7.914a3 3 0 104.243 4.243l1.828-1.829A3 3 0 008.586 5.5L8 6.086a1.001 1.001 0 00-.154.199 2 2 0 01.861 3.337L6.88 11.45a2 2 0 11-2.83-2.83l.793-.792a4.018 4.018 0 01-.128-1.287z"/><path d="M6.586 4.672A3 3 0 007.414 9.5l.775-.776a2 2 0 01-.896-3.346L9.12 3.55a2 2 0 112.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 10-4.243-4.243L6.586 4.672z"/></svg>
+                        Link
+                      </button>
+                      <button
+                        onClick={async () => { try { await downloadSingleFile(creds, branch, selectedFile); addToast('success', `Downloaded ${fileName}`); } catch(e) { addToast('error', 'Download failed'); } }}
+                        title="Download file"
+                        style={{background:'var(--accent)',border:'none',borderRadius:7,cursor:'pointer',color:'#fff',padding:'5px 12px',display:'flex',alignItems:'center',gap:6,fontSize:'0.8125rem',fontWeight:500,transition:'all 0.15s',fontFamily:'Sora,sans-serif',boxShadow:'0 1px 3px rgba(47,129,247,0.3)'}}
+                        onMouseEnter={e => { e.currentTarget.style.background='#1a6fd4'; }}
+                        onMouseLeave={e => { e.currentTarget.style.background='var(--accent)'; }}
+                      >
+                        <IcoDownload/> Download
+                      </button>
+                    </div>
                   </div>
 
                   {/* Content */}
